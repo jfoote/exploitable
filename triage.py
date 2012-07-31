@@ -1,0 +1,203 @@
+#!/usr/bin/env python
+
+### BEGIN LICENSE ###
+### Use of the triage tools and related source code is subject to the terms 
+### of the license below. 
+### 
+### ------------------------------------------------------------------------
+### Copyright (C) 2011 Carnegie Mellon University. All Rights Reserved.
+### ------------------------------------------------------------------------
+### Redistribution and use in source and binary forms, with or without
+### modification, are permitted provided that the following conditions are 
+### met:
+### 
+### 1. Redistributions of source code must retain the above copyright 
+###    notice, this list of conditions and the following acknowledgments 
+###    and disclaimers.
+### 
+### 2. Redistributions in binary form must reproduce the above copyright 
+###    notice, this list of conditions and the following disclaimer in the 
+###    documentation and/or other materials provided with the distribution.
+### 
+### 3. All advertising materials for third-party software mentioning 
+###    features or use of this software must display the following 
+###    disclaimer:
+### 
+###    "Neither Carnegie Mellon University nor its Software Engineering 
+###     Institute have reviewed or endorsed this software"
+### 
+### 4. The names "Department of Homeland Security," "Carnegie Mellon 
+###    University," "CERT" and/or "Software Engineering Institute" shall 
+###    not be used to endorse or promote products derived from this software 
+###    without prior written permission. For written permission, please 
+###    contact permission@sei.cmu.edu.
+### 
+### 5. Products derived from this software may not be called "CERT" nor 
+###    may "CERT" appear in their names without prior written permission of
+###    permission@sei.cmu.edu.
+### 
+### 6. Redistributions of any form whatsoever must retain the following
+###    acknowledgment:
+### 
+###    "This product includes software developed by CERT with funding 
+###     and support from the Department of Homeland Security under 
+###     Contract No. FA 8721-05-C-0003."
+### 
+### THIS SOFTWARE IS PROVIDED BY CARNEGIE MELLON UNIVERSITY ``AS IS'' AND
+### CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER 
+### EXPRESS OR IMPLIED, AS TO ANY MATTER, AND ALL SUCH WARRANTIES, INCLUDING 
+### WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ARE 
+### EXPRESSLY DISCLAIMED. WITHOUT LIMITING THE GENERALITY OF THE FOREGOING, 
+### CARNEGIE MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND 
+### RELATING TO EXCLUSIVITY, INFORMATIONAL CONTENT, ERROR-FREE OPERATION, 
+### RESULTS TO BE OBTAINED FROM USE, FREEDOM FROM PATENT, TRADEMARK AND 
+### COPYRIGHT INFRINGEMENT AND/OR FREEDOM FROM THEFT OF TRADE SECRETS. 
+### END LICENSE ###
+'''
+A simple batch wrapper script for the CERT 'exploitable' GDB extension. 
+'''
+
+from optparse import OptionParser
+from string import Template
+import subprocess
+import shlex
+import cPickle as pkl
+import os
+import warnings
+import sys
+
+# allows for un-pickling of exploitable's Classification objects
+sys.path.append("./exploitable")
+
+class TriagedStates(list):
+    '''
+    A list of triaged items: (substring, exploitable::Classification)
+    tuples.
+    '''
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+           
+    def __str__(self):
+        if len(self) == 1:
+            cl = self[0][1]
+            if cl:
+                return str(cl)
+            return "Failed to triage (no crash?): %s" % self[0][0] 
+            
+        result = ""
+        failed = []
+        last = None
+        get_class = lambda state: state[1]
+        triaged = sorted(filter(get_class, self), key=get_class)
+        for sub, classification in triaged:
+            if not classification or len(classification.tags) == 0:
+                failed.append(sub)
+                continue
+            if not last or str(classification.tags[0]) != str(last.tags[0]):
+                result += "\n%s: %s\n" % (classification.category,
+                                        classification.tags[0].short_desc)
+            result += "%s" % sub
+            if self.verbose:
+                for tag in classification.tags[1:]:
+                    result += " (%s)" % tag.short_desc
+            result += "\n"
+            last = classification
+            
+        failed = filter(lambda state: not state[1] or len(state[1].tags) == 0,
+                        self)
+        if len(failed) > 0:
+            result += "\nFailed to triage:\n"+ "\n".join([s[0] for s in failed])
+            
+        return result
+
+class Triager(object):
+    '''
+    An object that can triage a set of inferior invocations via calls to
+    GDB.
+    '''
+    gdb_cmd = "gdb --batch -ex \"source exploitable/exploitable.py\" " +\
+                "-ex run -ex \"exploitable -p %s\" --args"
+    tmp_file = "/tmp/triage.pkl"
+    verbose = False
+    def __init__(self):
+        pass
+    
+    def _cleanup_tmp_file(self):
+        '''
+        Deletes the temp file that is generated by the exploitable
+        extension and consumed by this script.
+        '''
+        if os.path.exists(self.tmp_file):
+            os.remove(self.tmp_file)
+    
+    def triage(self, inferior_cmd, inferior_subs, verbose=False):
+        '''
+        Triages a set of results of GDB invocations and returns a 
+        corresponding instance of TriagedStates
+        '''
+        self.verbose = verbose
+        inferior_template = Template(inferior_cmd)
+        triaged = TriagedStates(self.verbose)
+        pos = 0
+        for sub in inferior_subs:
+            pos = pos + 1
+            self._cleanup_tmp_file()
+            inferior_cmd = inferior_template.safe_substitute(sub=sub)
+            call = self.gdb_cmd % self.tmp_file + " " + inferior_cmd
+            self.vprint("(%d/%d) calling: %s" % (pos, len(inferior_subs), call))
+            subprocess.call(shlex.split(call), stdout=file(os.devnull, 'w'))
+            try:
+                classification = pkl.load(file(self.tmp_file, "rb"))
+            except Exception as e:
+                classification = None
+                warnings.warn("triage failed (%s), call=%s" % (e, call))
+            triaged.append((sub, classification))            
+            
+        self._cleanup_tmp_file()
+        return triaged
+    
+    def vprint(self, msg):
+        if self.verbose:
+            print msg
+
+version = "1.0"
+
+if __name__ == "__main__":
+    usage = "usage: %prog [options] CMD [arg1, arg2, ..]"
+    desc = "Runs CMD in gdb and prints results categorized by the " +\
+            "'exploitable' gdb command. If args are defined, CMD is " +\
+            "run for each arg with any instances of the magic string " +\
+            "${sub} in CMD replaced with the arg. Note that $ may " + \
+            "require an escape character (\\$)" 
+    
+    op = OptionParser(description=desc, usage=usage)
+    op.add_option("-v", "--verbose", action="store_true", 
+                      dest="verbose", default=False, 
+                      help="print verbose messages to stdout and includes "
+                      "all matching tags in summary")
+    op.add_option("-g", "--gdb-shell-cmd", action="store", 
+                      dest="gdb_shell_cmd", default=False, 
+                      help="overrides gdb shell command. Default is '%s'" 
+                      % Triager.gdb_cmd)
+    op.add_option("-t", "--tmp-filename", action="store", 
+                      dest="tmp_filename", default=False, 
+                      help="overrides temporary pkl filename. Default is '%s'" 
+                      % Triager.tmp_file)
+    (opts, args) = op.parse_args()
+    if len(args) < 1:
+        op.error("wrong number of arguments")
+    if len(args) == 1:
+        cmd = "${sub}"
+    else:
+        cmd = args[0]
+        args = args[1:]
+        
+    if opts.gdb_shell_cmd:
+        Triager.gdb_cmd = opts.gdb_shell_cmd
+    if opts.tmp_filename:
+        Triager.tmp_file = opts.tmp_filename
+        
+    results = Triager().triage(cmd, args, opts.verbose)
+    
+    print "\n\n\n\n", results
+    
