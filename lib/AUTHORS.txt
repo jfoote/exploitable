@@ -1,3 +1,0 @@
-Developer: Jonathan Foote (jmfoote at cert dot org)
-
-Test cases in ./tests were orignally written by Josh Bressers of Red Hat, Inc. (bressers at redhat dot com)
