@@ -24,3 +24,7 @@ Will Dormann of CERT at Carnegie Mellon University
 Allen Householder of CERT at Carnegie Mellon University
   Contributed updated CMU license text
   https://github.com/ahouseholder
+
+Thomas Barabosch of Fraunhofer FKIE
+  Added support for MIPS.
+  https://github.com/tbarabosch
